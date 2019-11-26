@@ -7,7 +7,7 @@ import Module from './maximilian.wasmmodule.js';
 
 class PostMsgTransducer {
 
-  constructor(msgPort, sampleRate, sendFrequency = 2) {
+  constructor(msgPort, sampleRate, sendFrequency = 2, name) {
     if (sendFrequency == 0)
       this.sendPeriod = Number.MAX_SAFE_INTEGER;
     else
@@ -15,6 +15,7 @@ class PostMsgTransducer {
     this.sendCounter = this.sendPeriod;
     this.port = msgPort;
     this.val = 0;
+    this.name=name;
   }
 
   incoming(msg) {
@@ -41,6 +42,7 @@ class PostMsgTransducer {
       this.port.postMessage({
         rq: "recv",
         value: sendMsg,
+        tname: this.name
       });
       this.sendCounter -= this.sendPeriod;
     } else {
@@ -125,7 +127,9 @@ class MaxiProcessor extends AudioWorkletProcessor {
     //
     // this.setupPolysynth();
     this.newq = () => {return {"vars":{}}};
+    this.newmem = () => {return new Float64Array(512)};
     this._q = [this.newq(),this.newq()];
+    this._mems =[this.newmem(), this.newmem()];
 
     this.setvar = (q, name, val) => {
       q.vars[name] = val;
@@ -133,7 +137,8 @@ class MaxiProcessor extends AudioWorkletProcessor {
     };
 
     this.getvar = (q, name) => {
-      return q.vars[name];
+      let val = q.vars[name];
+      return val ? val : 0.0;
     };
 
     this.silence = (q, inputs) => {
@@ -158,15 +163,15 @@ class MaxiProcessor extends AudioWorkletProcessor {
 
     this.transducers = {};
     this.registerTransducer = (name, rate) => {
-      let trans = new PostMsgTransducer(this.port, this.sampleRate, rate);
+      let trans = new PostMsgTransducer(this.port, this.sampleRate, rate, name);
       this.transducers[name] = trans;
       console.log(this.transducers);
       return trans;
     };
 
     this.getSampleBuffer = (bufferName) => {
-      console.log(this.sampleBuffers);
-      console.log(bufferName);
+      // console.log(this.sampleBuffers);
+      // console.log(bufferName);
         return this.translateFloat32ArrayToBuffer(this.sampleBuffers[bufferName]);
     };
 
@@ -174,20 +179,21 @@ class MaxiProcessor extends AudioWorkletProcessor {
       if ('address' in event.data) {
         //this must be an OSC message
         this.OSCMessages[event.data.address] = event.data.args;
-        console.log(this.OSCMessages);
+        //console.log(this.OSCMessages);
       } else if ('worker' in event.data) { //from a worker
         //this must be an OSC message
-        if (this.transducers[event.data.worker]) {
-          // console.log(this.transducers[event.data.worker]);
-          this.transducers[event.data.worker].incoming(event.data);
+        if (this.transducers[event.data.tname]) {
+          // console.log(this.transducers[event.data.tname]);
+          this.transducers[event.data.tname].incoming(event.data);
         }
       } else if ('sample' in event.data) { //from a worker
-        console.log("sample received");
-        console.log(event.data);
+        // console.log("sample received");
+        // console.log(event.data);
         let sampleKey = event.data.sample.substr(0,event.data.sample.length - 4)
         this.sampleBuffers[sampleKey] = event.data.buffer;
       } else if ('eval' in event.data) { // check if new code is being sent for evaluation?
         try {
+          console.log("[DEBUG]:MaxiProcessor:Process: ");
           console.log(event.data);
           // let setupFunction = new Function(`return ${event.data['setup']}`);
           let setupFunction = eval(event.data['setup']);
@@ -195,6 +201,7 @@ class MaxiProcessor extends AudioWorkletProcessor {
           // let loopFunction = new Function(`return ${event.data['loop']}`);
           this.currentSignalFunction = 1 - this.currentSignalFunction;
           this._q[this.currentSignalFunction] = setupFunction();
+          this._mems[this.currentSignalFunction] = this.newmem();
           // this._q[this.currentSignalFunction] = setupFunction()();
           this.signals[this.currentSignalFunction] = loopFunction;
           // this.signals[this.currentSignalFunction] = loopFunction();
@@ -234,8 +241,8 @@ class MaxiProcessor extends AudioWorkletProcessor {
 
       for (let i = 0; i < output[0].length; ++i) {
         //xfade between old and new algorhythms
-        let sig0 = this.signals[0](this._q[0], inputs[0]);
-        let sig1 = this.signals[1](this._q[1], inputs[0]);
+        let sig0 = this.signals[0](this._q[0], inputs[0][0][i], this._mems[0]);
+        let sig1 = this.signals[1](this._q[1], inputs[0][0][i], this._mems[1]);
         let xf = this.xfadeControl.play(i == 0 ? 1 : 0);
         let w = Module.maxiXFade.xfade(sig0, sig1, xf);
         //mono->stereo
